@@ -1,0 +1,323 @@
+name: 24/7 Mining with MSR on Ubuntu Latest
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    # Optimized schedule for 24/7 with 5 runs per day
+    - cron: '0 0,4,8,12,16,20 * * *'  # Run at 0,4,8,12,16,20 UTC (6 runs daily)
+
+jobs:
+  mining-operation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 270  # 4 hours 30 minutes (allows 30 min gap between runs)
+    
+    steps:
+    - name: Check system information
+      run: |
+        echo "🚀 Starting 24/7 Mining on ubuntu-latest"
+        echo "=========================================="
+        echo "Start Time: $(date)"
+        echo "Runner OS: $(lsb_release -d | cut -f2)"
+        echo "Kernel: $(uname -r)"
+        echo "CPU Cores: $(nproc)"
+        echo "Total Memory: $(free -h | awk '/^Mem:/ {print $2}')"
+        echo "Duration: 4h 30m per session"
+        echo "Auto-restart: Every 4h via cron"
+        echo "Wallet: TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9"
+        echo "Worker: github-$(date +%s)"
+    
+    - name: Install MSR tools and optimize system
+      run: |
+        echo "🔧 Installing MSR tools and optimizing system..."
+        
+        # Update and install required packages
+        sudo apt-get update -y
+        sudo apt-get install -y \
+          msr-tools \
+          cpuid \
+          numactl \
+          htop \
+          iotop \
+          sysstat \
+          lm-sensors \
+          cpufrequtils \
+          linux-tools-common \
+          linux-tools-generic
+        
+        # Load MSR module
+        sudo modprobe msr || echo "MSR module loaded or already present"
+        
+        # Check CPU capabilities
+        echo "📊 CPU Information:"
+        lscpu | grep -E "Model name|CPU\(s\)|Thread|Core|Socket"
+        
+        # Enable MSR access
+        sudo chmod 666 /dev/cpu/*/msr 2>/dev/null || true
+        
+        # Set CPU governor to performance
+        if [ -f /usr/bin/cpupower ]; then
+          sudo cpupower frequency-set -g performance
+          echo "✅ CPU governor set to performance"
+        else
+          for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+          do
+            [ -f "$gov" ] && echo "performance" | sudo tee "$gov" >/dev/null 2>&1 || true
+          done
+        fi
+        
+        # Increase system limits for better performance
+        echo "fs.file-max = 1000000" | sudo tee -a /etc/sysctl.conf
+        echo "net.core.somaxconn = 65536" | sudo tee -a /etc/sysctl.conf
+        echo "vm.swappiness = 10" | sudo tee -a /etc/sysctl.conf
+        sudo sysctl -p
+        
+        echo "✅ System optimization completed"
+    
+    - name: Clean previous containers and Docker cache
+      run: |
+        echo "🧹 Cleaning up previous runs..."
+        docker stop node 2>/dev/null || true
+        docker rm node 2>/dev/null || true
+        docker system prune -af --volumes 2>/dev/null || true
+        sudo rm -rf /tmp/docker-* 2>/dev/null || true
+        echo "✅ Cleanup done"
+    
+    - name: Start mining container with optimal settings
+      run: |
+        echo "🐳 Starting mining container..."
+        
+        # Get available CPU cores
+        CPU_CORES=$(nproc)
+        CPU_LIMIT=$(echo "$CPU_CORES * 0.6" | bc | awk '{printf "%.1f", $1}')
+        THREADS=$(echo "$CPU_CORES * 0.75" | bc | awk '{printf "%.0f", $1}')
+        
+        echo "📊 Resource Allocation:"
+        echo "   CPU Cores available: $CPU_CORES"
+        echo "   CPU Limit (60%): $CPU_LIMIT cores"
+        echo "   Threads: $THREADS"
+        echo "   Memory: 4GB"
+        
+        # Create custom entrypoint for MSR
+        cat > /tmp/docker-entrypoint.sh << 'EOF'
+        #!/bin/bash
+        
+        # Enable MSR access inside container
+        if [ -d /dev/cpu ]; then
+          for msr in /dev/cpu/*/msr; do
+            [ -e "$msr" ] && chmod 666 "$msr" 2>/dev/null || true
+          done
+        fi
+        
+        # Set performance governor if available
+        if [ -f /usr/bin/cpupower ]; then
+          cpupower frequency-set -g performance 2>/dev/null || true
+        fi
+        
+        # Execute the original command
+        exec "$@"
+        EOF
+        
+        chmod +x /tmp/docker-entrypoint.sh
+        
+        # Start container with optimized settings
+        docker run \
+          --name node \
+          --restart unless-stopped \
+          --cpus="$CPU_LIMIT" \
+          --memory="4g" \
+          --memory-swap="6g" \
+          --cpu-shares="1024" \
+          --ulimit nofile=65536:65536 \
+          --ulimit nproc=unlimited \
+          --cap-add=SYS_ADMIN \
+          --cap-add=SYS_NICE \
+          --cap-add=SYS_RESOURCE \
+          -v /dev/cpu:/dev/cpu:ro \
+          -v /tmp/docker-entrypoint.sh:/custom-entrypoint.sh:ro \
+          -d \
+          -e POOL="rx.unmineable.com:3333" \
+          -e COIN="TRX" \
+          -e WALLET_ADDRESS="TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9" \
+          -e WORKER_NAME="gh-ubuntu-$(date +%H%M)" \
+          -e CPU_LIMIT_ENABLE="true" \
+          -e CPU_LIMIT_PERCENT="60" \
+          -e THREADS="$THREADS" \
+          -e MSR_ENABLED="true" \
+          --entrypoint "/custom-entrypoint.sh" \
+          thechristech/unmineable:latest \
+          /entrypoint.sh
+        
+        echo "✅ Container started"
+        
+        # Verify container is running
+        sleep 5
+        echo "📦 Container Status:"
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.CreatedAt}}\t{{.Ports}}"
+        
+        # Check container logs
+        echo "📝 Initial Logs:"
+        docker logs --tail 5 node 2>/dev/null || echo "Waiting for logs..."
+    
+    - name: Monitor mining and send hello messages
+      run: |
+        echo "📡 Starting monitoring..."
+        echo "========================"
+        
+        # Calculate session duration (4 hours 25 minutes)
+        SESSION_SECONDS=$((265 * 60))  # 4h 25m
+        END_TIME=$((SECONDS + SESSION_SECONDS))
+        ITERATION=0
+        
+        # Function to get mining status
+        get_mining_status() {
+          if docker ps | grep -q node; then
+            # Get container stats
+            STATS=$(docker stats --no-stream --format "{{.CPUPerc}}|{{.MemPerc}}|{{.NetIO}}|{{.BlockIO}}" node 2>/dev/null || echo "N/A|N/A|N/A|N/A")
+            IFS='|' read -r CPU MEM NET BLOCK <<< "$STATS"
+            
+            # Get last log line
+            LOG=$(docker logs --tail 1 node 2>/dev/null | tail -1 || echo "No logs")
+            
+            echo "✅ ACTIVE | CPU: ${CPU:-N/A} | MEM: ${MEM:-N/A} | NET: ${NET:-N/A} | Last: ${LOG:0:60}"
+          else
+            echo "❌ INACTIVE - Attempting restart..."
+            docker start node 2>/dev/null || {
+              echo "⚠️  Full restart needed..."
+              docker rm -f node 2>/dev/null || true
+              CPU_CORES=$(nproc)
+              CPU_LIMIT=$(echo "$CPU_CORES * 0.6" | bc | awk '{printf "%.1f", $1}')
+              
+              docker run \
+                --name node \
+                --restart unless-stopped \
+                --cpus="$CPU_LIMIT" \
+                --memory="4g" \
+                -d \
+                -e POOL="rx.unmineable.com:3333" \
+                -e COIN="TRX" \
+                -e WALLET_ADDRESS="TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9" \
+                -e WORKER_NAME="gh-recovered-$(date +%H%M)" \
+                -e CPU_LIMIT_ENABLE="true" \
+                -e CPU_LIMIT_PERCENT="60" \
+                thechristech/unmineable:latest
+            }
+          fi
+        }
+        
+        # Main monitoring loop
+        while [ $SECONDS -lt $END_TIME ]; do
+          ITERATION=$((ITERATION + 1))
+          CURRENT_TIME=$(date '+%H:%M:%S')
+          
+          # Print hello message
+          echo "🔔 [$CURRENT_TIME] hello - Mining session active (Iteration #$ITERATION)"
+          
+          # Show mining status
+          get_mining_status
+          
+          # Show system info every 10 iterations
+          if [ $((ITERATION % 10)) -eq 0 ]; then
+            echo "📊 System Overview:"
+            echo "   Load: $(uptime | awk -F'load average:' '{print $2}')"
+            echo "   Memory: $(free -h | awk '/^Mem:/ {print $3 "/" $2}')"
+            echo "   Disk: $(df -h / | awk 'NR==2 {print $4 " free"})"
+            echo "   Temp: $(sensors 2>/dev/null | grep -E "Core|Package" | head -1 | awk '{print $3}' || echo "N/A")"
+          fi
+          
+          # Calculate time remaining
+          TIME_LEFT=$((END_TIME - SECONDS))
+          MINUTES=$((TIME_LEFT / 60))
+          SECONDS_LEFT=$((TIME_LEFT % 60))
+          
+          echo "⏰ Time until auto-restart: ${MINUTES}m ${SECONDS_LEFT}s"
+          
+          # Random sleep between 60-120 seconds
+          SLEEP_TIME=$((RANDOM % 61 + 60))
+          echo "💤 Next update in ${SLEEP_TIME}s"
+          echo "---"
+          
+          sleep $SLEEP_TIME
+          
+          # Health check every 30 minutes
+          if [ $((SECONDS % 1800)) -lt 10 ]; then
+            echo "🩺 Health check..."
+            if ! docker ps | grep -q node; then
+              echo "⚠️  Container stopped, restarting..."
+              docker start node 2>/dev/null || true
+            fi
+            
+            # Check memory usage
+            MEM_USAGE=$(docker stats --no-stream --format "{{.MemPerc}}" node 2>/dev/null | sed 's/%//' || echo "0")
+            if [ "${MEM_USAGE%.*}" -gt 90 ]; then
+              echo "⚠️  High memory usage (${MEM_USAGE}%), restarting..."
+              docker restart node 2>/dev/null || true
+            fi
+          fi
+        done
+        
+        echo "🕒 Session completed successfully"
+        echo "📈 Total monitoring iterations: $ITERATION"
+        echo "🔄 Next run starts in 30 minutes via cron"
+    
+    - name: Collect logs and cleanup
+      if: always()
+      run: |
+        echo "📊 Final Report - $(date)"
+        echo "========================"
+        
+        # Collect final logs
+        echo "📝 Final Container Logs:" > /tmp/final_report.txt
+        docker logs --tail 50 node 2>/dev/null >> /tmp/final_report.txt || echo "No logs available" >> /tmp/final_report.txt
+        
+        echo "" >> /tmp/final_report.txt
+        echo "📈 Final Statistics:" >> /tmp/final_report.txt
+        docker stats --no-stream node 2>/dev/null >> /tmp/final_report.txt || echo "No stats available" >> /tmp/final_report.txt
+        
+        echo "" >> /tmp/final_report.txt
+        echo "🖥️ System Summary:" >> /tmp/final_report.txt
+        uptime >> /tmp/final_report.txt
+        echo "CPU: $(nproc) cores" >> /tmp/final_report.txt
+        free -h >> /tmp/final_report.txt
+        
+        # Display report
+        cat /tmp/final_report.txt
+        
+        # Graceful shutdown
+        echo "🛑 Stopping container..."
+        docker stop --time 30 node 2>/dev/null || true
+        
+        echo "🗑️ Removing container..."
+        docker rm -f node 2>/dev/null || true
+        
+        # Clean Docker
+        echo "🧹 Cleaning Docker system..."
+        docker system prune -af --volumes 2>/dev/null || true
+        
+        # Reset CPU settings
+        echo "⚙️ Resetting CPU governor..."
+        if [ -f /usr/bin/cpupower ]; then
+          sudo cpupower frequency-set -g powersave 2>/dev/null || true
+        fi
+        
+        echo ""
+        echo "✅ Session ended at $(date)"
+        echo ""
+        echo "📅 Schedule Information:"
+        echo "   Next runs at: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC"
+        echo "   Each run: 4 hours 30 minutes"
+        echo "   Gap between runs: 30 minutes"
+        echo "   Total daily coverage: 27 hours (overlapping for 24/7)"
+        echo ""
+        echo "💰 Mining Wallet: TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9"
+        echo "👷 Worker Pattern: gh-ubuntu-[time]"
+    
+    - name: Notify completion (optional)
+      if: success()
+      run: |
+        echo "🎉 Mining session completed successfully!"
+        echo "⏳ Next auto-restart in approximately 30 minutes"
+        echo ""
+        echo "To check your earnings:"
+        echo "1. Visit: https://unmineable.com/coins/TRX/address/TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9"
+        echo "2. Search for worker: gh-ubuntu-*"
+        echo "3. Check regularly for accumulated TRX"
